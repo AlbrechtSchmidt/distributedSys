@@ -1,0 +1,606 @@
+\documentstyle[12pt, german, a4]{article}
+\parindent0pt
+
+\begin{document}
+{\it Albrecht Schmidt \hfill Verteilte Systeme --- "Ubung Blatt 5 \hfill 5.7.95} \\
+
+\vspace{5mm}
+
+{\Large Aufgabe 2: Project File System}
+
+\section{Makefile}
+
+\vspace{3mm}
+\begin{verbatim}
+all: ProjectServer ProjectClient
+
+ProjectServer: ProjectServer.c Project.h
+        gcc -o ProjectServer -D_REENTRANT ProjectServer.c -lthread -lsocket -lnsl
+
+ProjectClient: ProjectClient.c Project.h
+        gcc -o ProjectClient ProjectClient.c -lsocket -lnsl
+
+clean:
+        rm -f core
+       	rm -f ProjectServer 
+       	rm -f ProjectClient 
+       	rm -f *.bak
+\end{verbatim}
+ 
+\section{Headerfile: Project.h} 
+ 
+\vspace{3mm} 
+\begin{verbatim}
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+
+#define TRUE      1
+#define DIR_MSG "dir"
+#define GET_MSG "get"
+#define PUT_MSG "put"
+#define CLOSE_MSG "bye"
+#define KILL_MSG  "kill"
+
+#define EOT ">EOT<"
+#define MODE  0000666  /* Dateizugriff */
+\end{verbatim}
+        
+\pagebreak
+
+\section{Der Project Server}         
+ 
+\vspace{3mm} 
+\begin{verbatim}
+#include "Project.h" 
+#include <signal.h>   /* kill() wird benoetigt um aus dem Thread das 
+                           Programm zu beenden */  
+#include <thread.h>   /* fuer die Threads */
+#include <dirent.h>   /* zum lesen des File-Directory */
+ 
+#define STD_PATH "./" /* Standartpfad falls kein Argument angegeben wird */
+#define MAXFILES  100 /* Anzahl maximal zulaessiger Directory-Eintraege */
+#define HELP_ARG  "-help"
+ 
+
+typedef struct   /* Parameter fuer die Threadfunktion in struct */
+{                /* speichern .., falls noch weiter Parameter dazu kommen */
+	int msock;
+} ThreadArg;
+
+typedef ThreadArg * PThreadArg; 
+
+
+typedef struct        /* struct der Verzeichniseintraege */
+{	char Alias[40];
+        char Path[200];
+} DirEntry;
+
+
+DirEntry  FileTable[MAXFILES]; /* das Directory */
+int entries;          /* Anzahl belegter Directory-Eintraege */
+char KommuDIR[256] ;  /* Hier steht das publizierte Verzeichnis */
+
+
+int showHelp(char * Pname)
+{
+  printf("\nUSAGE: %s [<directory> [<port>]]\n\n", Pname);
+  printf("Wird <port> nicht angegeben waehlt das System einen aus !\n");
+  printf("Wird <directory> und <port> nicht angegeben wird auf dem\n");
+  printf("Standartdirectory %s gearbeitet und das System waehlt\n", STD_PATH); 
+  printf("einen Port aus !\n\n");
+  exit(1);
+}
+
+
+/* Diese Funktion baut eine Socket TCP-Verbindung auf */
+/* der Rueckgabewert ist der Socketdescriptor         */
+int InitTCP(struct sockaddr_in * server, int s_port)
+{
+  int sockId, length;
+  sockId = socket(AF_INET, SOCK_STREAM, 0);
+  if ( sockId == -1 )
+  {
+     perror("opening stream socket");
+     exit(1);
+  }
+  (*server).sin_family = AF_INET;
+  (*server).sin_addr.s_addr = INADDR_ANY;
+  (*server).sin_port = htons(s_port);  /* den Port festlegen */
+  if ( bind( sockId, (struct sockaddr *) server, sizeof (*server) ) == -1 )
+  {
+     perror("binding stream socket");
+     exit(1);
+  }
+  length = sizeof server;
+  if ( getsockname( sockId, (struct sockaddr *)server, &length ) == -1)
+  {
+     perror("getting socket name");
+     exit(1);
+  }
+  printf("Socket installed on Port #%d\n", ntohs( (*server).sin_port));
+  return sockId;
+}
+
+/* Funktion zum Verzeichnis lesen */
+void readDIR()
+{
+   DIR *dirp;
+   struct dirent *direntp;
+   entries =0;
+   dirp = opendir( KommuDIR ); /* Verzeichnis oeffnen */
+     /* solange noch was da ist lesen und die Maximalzahl nicht
+        ueberschritten ist lesen */
+     while ( ( (direntp = readdir( dirp )) != NULL ) || (entries > MAXFILES))
+     {
+         /* nur files anzeigen die nicht mit einem "." beginnen ! */
+         if (direntp->d_name[0] != '.')
+         {
+           strcpy(FileTable[entries].Alias, direntp->d_name);
+           strcpy(FileTable[entries].Path, KommuDIR);
+           strcat(FileTable[entries].Path, direntp->d_name);
+           entries++;
+         }
+      }
+   closedir( dirp );
+}   
+
+
+/* Die thread-Funktion, sie bearbeitet die Anfragen */
+void * thread_func(void * arg)
+{
+  PThreadArg p = (PThreadArg)arg; /* Parameter in Variablem umwandeln */
+  char buf[1024], befehl[30], para[100]; 
+  int rval, para_num, i, l, msgsock, ready;
+  int fd, rd_cnt, wrt_cnt;
+  msgsock = p->msock; /* locale Variable mit Parameter belegen */
+  do 
+  { 
+    memset(buf, 0, sizeof buf);    
+    /* Anfrage lesen vom Socket */
+    if ((rval = read(msgsock, buf, 1024)) == -1)
+         perror("reading stream message");
+     
+
+    /* Der Client schickt ein "bye" --> Verbindung abbauen */
+    if (strncmp(CLOSE_MSG, buf, strlen(CLOSE_MSG))==0)
+    { 
+              break;
+    } 
+
+
+    /* Der Client schickt ein "kill" --> Verbindung abbauen 
+                                         und Server anhalten */
+    if (strncmp(KILL_MSG, buf, strlen(KILL_MSG))==0)
+    { 
+         close(msgsock);
+         printf("\nreceived KILL !\n");
+         kill(getpid(), SIGTERM);
+    }    
+ 
+    /* sonst wenn eine andere Meldung ankommt */
+    if (rval == 0)    
+         printf("Ending connection\n");
+    else 
+    { 
+
+
+
+
+
+       /* Message in Befehl und Parameter zerlegen */
+       para_num=sscanf(buf, "%s%s", befehl, para);
+       if (para_num < 1) /* leere Befehl */
+       { 
+           strcpy(befehl, "");
+           strcpy(para,"");
+       } 
+       if (para_num == 1) /* Befehl ohne Parameter */
+       { 
+           strcpy(para,"");
+       } 
+       printf("-->Befehl: %s %s \n", befehl, para);
+
+
+
+
+
+            
+
+       /* Der Client schickt "dir" --> directory schicken ! */
+       if ( strncmp (DIR_MSG, befehl, strlen(DIR_MSG))==0)
+       {
+          readDIR(); /* aktuelles Verzeichnis einlesen */
+          /* alle Eintraege schicken */
+          for(i=0;i<entries;i++)
+          {
+                sprintf(buf,"(%.2i) : %s\n", i, FileTable[i].Alias);
+                write(msgsock, buf, sizeof buf);
+          }
+           /* Ende signalisieren */
+           write(msgsock, EOT, strlen(EOT));
+       }
+
+
+
+
+
+
+       /* Der Client schickt "get ?" --> angefordertes file schicken */
+       if ( strncmp (GET_MSG, befehl, strlen(GET_MSG))==0)
+       {
+           i=atoi(para); /* String in Zahl umwandeln
+                            --> Nummer des Files */
+           /* File zu lesen oeffnen */
+           if (( fd = open(FileTable[i].Path, O_RDONLY)) == -1 )
+           {
+                   /* im Fehlerfall Meldung schicken */
+                   memset(buf,0,(sizeof buf));
+                   sprintf(buf, "Can't open %s ! (file: %s)\n",
+                           FileTable[i].Alias, FileTable[i].Path);
+                   buf[1024]='\0';
+                   printf("%s", buf);
+                   write(msgsock, buf, strlen(buf));
+                   write(msgsock, EOT, strlen(EOT));
+           } 
+           else 
+           { 
+                   /* sonst das File Blockweise uebertragen */
+                   memset(buf,0,(sizeof buf));
+                   while( (rd_cnt = read(fd, buf, sizeof buf)) > 0)
+                   {
+                           printf("send %i bytes to client !\n", rd_cnt);
+                           if ( (wrt_cnt=write(msgsock, buf, 1024)) == -1)
+                               printf("socket write Error !\n");
+                           memset(buf,0,(sizeof buf));
+                    
+                   }
+                   /* Ende signalisieren */
+                   write(msgsock, EOT, strlen(EOT));
+           } 
+       } 
+ 
+
+
+
+
+       /* Der Client schickt "put ?" --> geschicktes file speichern */
+       if ( strncmp (PUT_MSG, befehl, strlen(PUT_MSG))==0)
+       {
+         i=atoi(para); /* String in Zahl umwandeln
+                          --> Nummer des Files */
+         if (access(FileTable[i].Path, 0) != -1) /* File wird geloescht */
+         {
+            printf(" remove old File !!! \n");
+            remove(FileTable[i].Path);
+         }
+         /* File zu schreiben oeffnen */
+         if (( fd = open(FileTable[i].Path, O_WRONLY | O_CREAT, MODE)) == -1 )
+         {
+            /* im Fehlerfall Meldung ausgeben */
+            printf("Can't open %s !\n", FileTable[i].Path);
+         }
+         else
+         {
+            /* File blockweise lesen und in die Datei schreiben */
+            do
+            {
+               memset(buf, 0, sizeof buf);
+               if (read(msgsock, buf, sizeof buf) == -1 )
+                    perror("reading on stream socket");
+               if (strncmp(EOT, buf, strlen(EOT))== 0) ready =1;
+               else
+               {
+                 ready=0;
+                 l=strlen(buf);
+                 if (l>1024) l=1024; /* maximale Blockgroesse darf
+                                        nicht ueberschritten werden */
+                 if ( (wrt_cnt = write(fd, buf, l)) == -1)
+                    printf("Can't write in file %s !\n", FileTable[i].Path);
+                 printf(" ."); /* pro Block einen Punkt schreiben */
+               }
+            }
+            while(!ready); /* Schleife beenden wenn EOT vom Server kommt */
+            printf("\n");
+         }
+     }
+
+
+
+
+   } 
+ }
+ while (rval != 0); /* Ende wenn eine 0 Byte Nachricht empfangen wurde
+                           diese Schleife wird auch durch breaks bei kill
+                           und bye verlassen */
+ close(msgsock);      /* die Verbindung zum Clienten abbauen */
+} 
+
+
+
+
+/* Diese Funktion erzeugt einen Thread Das Argument ist der
+   Socketdescriptor fuer dir Kommunikation mit dem Clienten */
+void create_thread(int msgsock)
+{
+        thread_t t;
+        PThreadArg p;
+        /* Specher fuer den Parameter anlegen */
+        p = (PThreadArg)malloc(sizeof(ThreadArg));
+        /* Parameter in das struct schreiben */
+        p->msock=msgsock;
+        /* den Thread erzeugen */
+        thr_create(NULL,0,thread_func,(void *)p,THR_NEW_LWP,&t);
+}
+\end{verbatim} 
+         
+\pagebreak
+
+\begin{verbatim}
+void main( int argc, char *argv[])
+{
+ struct sockaddr_in server;
+ int sock, msgsock, port;
+ /* das erste Argument wird als Pfad genommen */
+ if (argc > 1)
+ {
+        if (strncmp(argv[1], HELP_ARG, strlen(HELP_ARG)) == 0)
+                showHelp(argv[0]);
+        else
+        {
+                strcpy(KommuDIR, argv[1]); 
+                /* das lezte Zeichen muss ein "/" sein ! */
+                if (KommuDIR[strlen(KommuDIR)-1] != '/') strcat(KommuDIR, "/");
+        }
+  }
+ /* wird kein Pfad als Argument angegeben wird der Standardpfad genommen */
+ else strcpy(KommuDIR, STD_PATH);
+ 
+ /* wurde ein 2. Argument angegeben wird diese als Port interpretiert */
+ /* sonst wird vom System ein Port (server.port = 0) gewaehlt         */
+ if (argc > 2) port = atoi(argv[2]); /* den Port festlegen */
+       else port = 0;
+ 
+ printf("\nProjectServer --> weitere Informationen mit %s %s\n\n", 
+                     argv[0], HELP_ARG);
+ sock = InitTCP(&server, port); /* TCP - Verbindung aufbauen */
+ printf("Directory is: %s\n\n" , KommuDIR);
+ 
+ /* den Socket Empfangsbereit machen  */
+ listen( sock, 5 );
+  do
+  {
+     /* auf Anfragen der Clienten warten */
+     msgsock = accept( sock, (struct sockaddr *)0, (int *)0 );
+     if (msgsock == -1) perror("accept");
+     else
+       create_thread(msgsock); /* aus der Anfrage einen Thread erzeugen */
+  } while(TRUE); /* Dies Schleife wird durch ein kill aus dem
+                    Thread abgebrochen */
+ close(sock);
+}
+\end{verbatim} 
+         
+\pagebreak
+
+\section{Der Project Client}
+  
+\vspace{3mm}  
+\begin{verbatim}
+#include "Project.h"
+#define HELP_CMD "help"
+ 
+void main( int argc, char *argv[])
+{
+  int sock,l, ready, fd, rd_cnt, wrt_cnt;
+  struct sockaddr_in server;
+  struct hostent *hp, *gethostbyname();
+  char buf[1024], cmd[50], LocalName[200];
+  /* TCP Verbindung zum Server aufbauen 
+     argv[1] : Hostname 
+     argv[2] : Port
+  */
+  if (argc > 2)
+  {
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == -1)
+    {
+      perror("opening stream socket");
+      exit(1);
+    }
+
+    server.sin_family = AF_INET; 
+    hp = gethostbyname(argv[1]);
+
+    if ( hp == (struct hostent *)0 )
+    {
+      fprintf(stderr, "%s: unknown host\n", argv[1]);
+      exit(2);
+    }
+    memcpy((char *) &server.sin_addr, (char *)hp->h_addr, hp->h_length);
+    server.sin_port = htons(atoi(argv[2]));
+    if (connect(sock, (struct sockaddr *)&server, sizeof server) == -1)
+    {
+      perror("connecting stream socket");
+      exit(1);
+    }
+
+
+ 
+    /* Eingabeschleife mit ">" als Userprompt */
+    do
+    {
+      printf("\n>");
+      gets(cmd);
+      /* Kommando einlesen */
+ 
+
+
+     
+      /* Eingabe "help" */
+      if (strncmp(cmd, HELP_CMD, strlen(HELP_CMD)) == 0)
+      {
+        printf("\n Kurzhilfe:");
+        printf("\n dir        ...   Directory anzeigen");
+        printf("\n get #      ...   Datei mit Nummer # anfordern");
+        printf("\n put #      ...   Datei mit Nummer # zurueckschreiben");
+        printf("\n\n bye        ...   vom Server abmelden");
+        printf("\n kill       ...   Server abschalten\n");
+      }
+
+
+ 
+      /* Eingabe "kill" --> KILL_MSG an Server schicken */
+      if (strncmp(cmd, KILL_MSG, strlen(KILL_MSG)) == 0)
+      {
+        if ( write(sock, KILL_MSG, sizeof KILL_MSG) == -1 )
+            perror("writing on stream socket");
+        break;
+      }
+
+
+
+      /* Eingabe "bye" --> CLOSE_MSG an Server schicken */
+      if (strncmp(cmd, CLOSE_MSG, strlen(CLOSE_MSG)) == 0)
+      {
+        if ( write(sock, CLOSE_MSG, sizeof CLOSE_MSG) == -1 )
+            perror("writing on stream socket");
+        break;
+      }
+
+
+
+ 
+      /* Eingabe "dir" --> DIR_MSG an Server schicken */
+      if (strncmp(cmd, DIR_MSG, strlen(DIR_MSG)) == 0)
+      {     
+        if ( write(sock, DIR_MSG, sizeof DIR_MSG) == -1 )
+            perror("writing on stream socket");
+        printf("\nDirectory \n");
+        /* Verzeichniseintraege empfangen und anzeigen bis
+           Server das Ende signalisiert */
+        do
+        {
+                if (read(sock, buf, sizeof buf) == -1 )
+                  perror("reading on stream socket");
+                if (strncmp(EOT, buf, strlen(EOT))== 0) ready =1;
+                else
+                {
+                        ready=0;
+                        printf("%s", buf);
+                }
+        }
+        while(!ready);
+        printf("\n");
+      }
+ 
+ 
+      /* Eingabe "get ?" --> GET_MSG an Server schicken */
+      if (strncmp(cmd, GET_MSG, strlen(GET_MSG)) == 0)
+      {
+        /* lokalen Dateinamen fuer die zu empfangende Datei festlegen */
+        printf(" lokaler Dateiname: ");
+        gets(LocalName);
+ 
+        /* Wenn das File schon existiert wird es geloescht */
+        if (access(LocalName, 0) != -1)
+        {
+                printf(" remove old File !!! \n");
+                remove(LocalName);
+        }
+
+
+
+
+
+ 
+        /* File anlegen und zu schreiben oeffnen */
+        if (( fd = open(LocalName, O_WRONLY | O_CREAT, MODE)) == -1 )
+                {
+                        printf("Can't open %s !\n", LocalName);
+                }
+        else
+        {
+           if ( write(sock, cmd , strlen(cmd)) == -1 )
+               perror("writing on stream socket");
+           printf(" downloading file  ");
+        
+           /* File blockweise lesen und in die Datei schreiben */
+           do
+           {
+                memset(buf, 0, sizeof buf);
+                if (read(sock, buf, sizeof buf) == -1 )
+                  perror("reading on stream socket");
+                if (strncmp(EOT, buf, strlen(EOT))== 0) ready =1;
+                else
+                {
+                        ready=0;
+                        l=strlen(buf);
+                        if (l>1024) l=1024; /* maximale Blockgroesse darf
+                                               nicht ueberschritten werden */
+                        if ( (wrt_cnt = write(fd, buf, l)) == -1)
+                        {
+                            printf("Can't write in file %s !\n", LocalName);
+                        }
+                        printf(" ."); /* pro Block einen Punkt schreiben */
+                }
+            }
+            while(!ready); /* Schleife beenden wenn EOT vom Server kommt */
+            printf("\n");
+        }
+      }
+\end{verbatim} 
+         
+\pagebreak
+
+\begin{verbatim}
+      /* Eingabe "put ?" --> PUT_MSG an Server schicken */
+      if (strncmp(cmd, PUT_MSG, strlen(PUT_MSG)) == 0)
+      {
+ 
+          /* lokalen Dateinamen fuer die zu empfangende Datei festlegen */
+          printf(" lokaler Dateiname: ");
+          gets(LocalName);
+ 
+         /* File zu lesen oeffnen */
+         if (( fd = open(LocalName, O_RDONLY)) == -1 )
+         {
+              /* im Fehlerfall Meldung ausgeben */
+              printf("Can't open %s !\n", LocalName);
+         }
+         else
+         {
+             /* Kommando an Server schicken */
+             if ( write(sock, cmd , strlen(cmd)) == -1 )
+               perror("writing on stream socket");
+             printf(" transmitting file   ");
+             /* sonst das File Blockweise uebertragen */
+             memset(buf,0,(sizeof buf));
+             while( (rd_cnt = read(fd, buf, sizeof buf)) > 0)
+             {
+                 printf(" .");
+                 if ( (wrt_cnt=write(sock, buf, 1024)) == -1)
+                           printf("socket write Error !\n");
+                 memset(buf,0,(sizeof buf));
+             }
+             write(sock, EOT, strlen(EOT)); /* Ende signalisieren */
+          }
+          printf("\n");
+      }
+    }
+    while(TRUE); /* diese Schleife wird durch ein break
+                    bei einem "kill" oder "bye" Kommando verlassen */
+    close(sock);
+    printf("\n... bye !\n");
+    exit(0);
+  }
+  else
+        printf("\nUSAGE: %s <hostname> <port>\n\n", argv[0]);
+}
+\end{verbatim}
+\end{document}
+ 
