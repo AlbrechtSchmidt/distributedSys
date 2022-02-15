@@ -1,0 +1,1 @@
+cc -o$1 -D_REENTRANT $1.c -lthread

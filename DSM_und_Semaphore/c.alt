@@ -1,0 +1,161 @@
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <stdlib.h>
+#include <thread.h>
+#include <stdio.h>
+#include "UDP.h"
+
+#define Pakete 10
+#define BSIZE 82
+#define PAGESIZE 4096
+
+int fd;
+caddr_t result;
+
+ 
+sema_t empty,full;
+
+struct {
+        char data[BSIZE];
+        int size;
+        } buf;
+
+
+   int sock, lenClient, count ;
+   struct sockaddr_in client;
+   struct hostent *hp;
+   char machine[20] ;
+   char msg[30];
+   char DataStr[20];
+	char * p;
+        char c;
+
+
+void segv(int a)
+{
+        caddr_t x;
+
+	printf("SIGSEGV signal a=%i\n", a);
+	x = mmap((void *)result, PAGESIZE, 
+		PROT_READ|PROT_WRITE, MAP_SHARED|MAP_FIXED, fd, 0);
+        sema_post(&full);
+}
+
+
+
+void * producer(void * arg)
+{
+        while(1) {
+                /* printf(" in producer vor ! "); */
+                sema_wait(&empty);
+                /*  printf(" .. nach  ! \n "); */
+        
+        	gets(msg);
+        
+        
+                /*  printf( "p  msg :  %s \n", msg); */ 
+                strcpy(p, msg);
+                buf.size=strlen(msg);
+ 
+ 
+                
+		if (strcmp(ENDE, msg)==0) buf.size = -1;
+                if (buf.size == -1 ) break;
+         }
+}
+ 
+
+void * consumer(void * arg)
+{
+        caddr_t x;
+        while(1) {
+                /* printf(" in consumer vor wait  ! "); */
+                sema_wait(&full);
+                /*  printf(" .. nach  ! \n "); */ 
+                if (buf.size == -1) break;
+                /* printf( "rec msg   %s \n", msg); */
+                printf( "c send %s\n", p);
+  
+                strcpy(DataStr, p);
+                /* printf(" DataStr: %s \n",DataStr);  */
+	        if (sendto (sock, DataStr , sizeof DataStr , 0,
+                        (struct sockaddr *) &client, sizeof client) == -1)
+      	        	perror(" sending DATAGRAM socket name !!!");
+                printf( "p 1 :  %s \n", p);  
+
+		x = mmap((void *)result, PAGESIZE, 
+			PROT_READ, MAP_SHARED|MAP_FIXED, fd, 0);
+   		signal(SIGSEGV,segv);
+
+                printf( "p 2 :  %s \n", p);  
+
+                sema_post(&empty);
+                }
+}
+ 
+
+
+/* UDP - Socket       CLIENT   */
+
+
+int main(int argc, char * argv[])
+{
+
+
+ if (argc == 2)
+ {
+   thread_t tproducer, tconsumer;
+   sema_init(&empty,1,USYNC_THREAD,NULL);
+   sema_init(&full,0,USYNC_THREAD,NULL);
+ 
+   if ((fd = open("/dev/zero", O_RDWR)) == -1) return 1;
+   result = mmap((void *)0, PAGESIZE, PROT_READ, MAP_SHARED, fd, 0);
+   printf("address = %08X\n",result);
+
+   p=(char *)result;
+   signal(SIGSEGV,segv);
+
+
+   sock = socket( AF_INET, SOCK_DGRAM, 0 );  /* fuer UDP - Verbindung*/
+   if (sock == -1) {
+                     perror(" opening DATAGRAM socket !!!");
+                     exit(1);
+                   }
+
+   /* gethostname(machine, 20); */
+
+   hp = gethostbyname(argv[1]);
+   
+   if (hp == (struct hostent *) 0)
+                 {
+                   fprintf(stderr, "%s: unknown host \n", machine);
+                   exit(2);
+                 }
+  client.sin_family = AF_INET;
+
+  memcpy( (char *) &client.sin_addr, (char *) hp->h_addr, hp->h_length );  
+
+  client.sin_port = htons (S_PORT);
+
+  thr_create(NULL,0,producer,NULL,THR_NEW_LWP,&tproducer);
+   thr_create(NULL,0,consumer,NULL,THR_NEW_LWP,&tconsumer);
+   thr_join(tconsumer,NULL,NULL);
+ 
+
+
+  close( sock );
+  exit(0);
+ }
+ else
+ {
+   printf("USAGE: %s <hostname> \n", argv[0]);
+ }
+
+}
+    

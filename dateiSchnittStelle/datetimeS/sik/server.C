@@ -1,0 +1,245 @@
+#include <string.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <dirent.h>
+#include <fcntl.h>
+
+#include "KommuDIR.h" 
+
+int pfd_M[2],pfd_S[2], nread;
+
+void no_block(int p)
+{ 
+  int flags;
+  if (  (flags=fcntl(p, F_GETFL, 0)) == -1 )
+             perror("\n fcntl 1\n");
+  if ( fcntl(p, F_SETFL, flags | O_NDELAY ) == -1)
+             perror("\n fcntl 2\n");
+}
+ 
+
+int write_alive(char *msg, int p)
+{ 
+  int ret;
+  int t=1;
+  printf("\n in write alive \n");
+  do
+  { 
+    t=t+1;
+    sleep(1); 
+    ret = write(p, msg, sizeof(msg));
+  }
+  while( (t<5) && (ret == -1)) ;
+  if ( ret == -1 ) perror("\n Write to Pipe - Error \n ");
+  return ret;
+}
+
+int is_alive(char *msg, int p)
+{ 
+  int nread;
+  char s[100];
+  int t=1;
+  do
+  { 
+    t=t+1;
+    sleep(2); 
+    nread=read(p, s, sizeof(s));
+  }
+  while( (t<5) && (nread == -1)) ;
+  
+  if (nread == -1)
+  {  
+     perror("\n Pipe Read - Error \n"); return 0;
+  } 
+  printf("\n  in is_alive: >>%s<< \n", s); 
+  return strspn(s, msg) ;
+}
+ 
+
+
+/* erstellt das Ready-File (leeres File)
+   das dem Client signalisiert, dass der Server fertig ist.
+   Die Sender-Adresse (Client-Nr)
+   steht im Dateinamen. Die Zugriffsrechte sind so gesetzt
+   dass der Client die Datei loeschen kann.              */
+void write_Ready(char *id)
+{
+  FILE *file_nr;
+  char FileName[30];
+  sprintf(FileName,"Ready.%s", id);
+  file_nr = fopen(FileName, "w+");
+  fclose(file_nr);
+  chmod(FileName, S_IRWXO | S_IRWXU);
+  printf("\nServer writes file %s \n", FileName );
+}
+
+/* schreibt das Time-File (Textstring mit Datum und Uhrzeit)
+   das im Dateinamen die Clientnummr traegt.
+   Die Zugriffsrechte sind so gesetzt
+   dass der Client die Datei loeschen kann.              */
+void write_Time(char *id, char *TimeStr)
+{
+  FILE *file_nr; 
+  char FileName[30];
+  sprintf(FileName,"Time.%s", id);
+  file_nr = fopen(FileName, "wt");
+  fputs(TimeStr, file_nr);
+  fclose(file_nr);
+  chmod(FileName, S_IRWXO | S_IRWXU);
+  printf("\nServer writes file %s \n", FileName );
+}
+
+/* loescht das Request-File mit der eigenen Client-ID */
+void remove_Request(char *id)
+{
+  char FileName[30];
+  sprintf(FileName,"Request.%s", id);
+  remove(FileName);
+  printf("\nServer removes file %s \n", FileName );
+}
+
+/* liest die Systemzeit und gibt die in einem 
+   String zurueck                              */
+char *Read_SysTime()
+{
+   time_t t;
+   time(&t);
+   return ctime(&t);
+}
+
+/* sucht im Kommunikationsverzeichnis nach Anfragen
+   (also noch Files der Form: Resquest.xxxx) und
+   gibt die Identifikation als String zurueck     */
+char *next_Req_ID()
+{
+   char Dir_entry[80];
+   char IdStr[10];
+   char isReqStr[10];
+   int newReq=0;
+   DIR *dirp;
+   struct dirent *direntp;
+   IdStr[0]='\0'; 
+   dirp = opendir( KommuDIR );
+     
+     while ( (direntp = readdir( dirp )) != NULL )
+     {
+         strcpy(Dir_entry,direntp->d_name);
+         strncpy(isReqStr, Dir_entry, 7);
+         isReqStr[7]='\0';
+         if (!strcmp(isReqStr, "Request"))
+         {
+           strcpy(IdStr, Dir_entry+8);
+           IdStr[strlen(Dir_entry)-8]='\0';
+           newReq=1;
+         } 
+      }
+      sleep(1); // eine Sekunde warten 
+   
+   closedir( dirp );
+
+   return IdStr;
+}   
+
+int Sohn()
+{
+  char IdStr[20]; 
+  printf("\n Server on !\n"); 
+  chdir(KommuDIR);
+  do
+  {  
+     write_alive("1", pfd_M[1]);
+
+     strcpy(IdStr,next_Req_ID());
+     printf("\n-----------------------------\n"); 
+     printf("\nRequest form Client >>%s<<\n", IdStr); 
+     if (!strcmp(IdStr, "kill"))
+     {
+       remove_Request(IdStr);
+       printf("\nServer off !!! \n");
+       return 0;
+     }
+     else
+     if (!strlen(IdStr)==0)
+     {
+        write_Time(IdStr, Read_SysTime());
+        write_Ready(IdStr);
+        remove_Request(IdStr);
+     }
+     
+     sleep(1);
+
+  }
+  while(1==1);
+}
+
+int Vater()
+{
+  int ret,i;
+  char  ja[1];
+  printf("\n hier ist der Sohn !!! \n");
+  
+  do 
+  {
+   
+     ret = is_alive("1" , pfd_M[0]);
+    /* printf("\n ret = %i  \n", ret); */
+  
+    sleep(1);
+     if (ret) printf("\n 1 is alive !!\n");
+       else printf("\n 1 is not  alive !!\n");
+ 
+//     printf("\n %i ", ret); 
+  }
+  while(ret);
+ 
+  printf("\n Server is killed !!!\n");
+}
+
+
+
+
+int main()
+{
+  int pid,r;
+  char  ja[1];
+  printf("\n ***** Start ---> !!!!! \n");
+ 
+  if (pipe(pfd_M) == -1)
+  {
+    printf("\n Fehler beim oeffnen der Pipe !!! \n");
+    return -2;
+  }
+  
+  if (pipe(pfd_S) == -1)
+  {
+    printf("\n Fehler beim oeffnen der Pipe !!! \n");
+    return -2;
+  }
+ 
+  no_block(pfd_M[0]);
+  no_block(pfd_M[1]);
+  no_block(pfd_S[0]);
+  no_block(pfd_S[1]);
+ 
+  do
+  {
+    printf(" \n fork() !!! \n");
+    pid=fork();
+    switch (pid)
+    {
+      case -1: printf("\n Fehler bei fork() \n");
+               return -1;
+      case 0:  Sohn();
+               r=0;
+               break;
+      default : Vater(); 
+               printf("\n nochmal starten ? (j/n) \n");
+               gets(ja);
+               if (ja[0]=='j') r=1; else r=0;
+    }
+  }
+  while(r==1);
+}

@@ -1,0 +1,68 @@
+Funktionsweise des Tokenrings:
+
+Implementieren sie eine Prozesskommunikation mehrerer Prozesse,
+die mittels einer Tokenringstruktur kommunizieren. Verwenden 
+sie die Dateischnittstelle. Verwenden sie also Dateinamen die
+kennzeichen von welchem Prozess sie gelesen werden duerfen (Nachbar).
+Dabei ist jeder Prozess durch seine eigene ID und durch die
+seines Nachbarn gekennzeichnet.
+
+der Ring koennte folgendermassen aussehen
+
+
+     P1----->P2----->P3----->P4-+
+     ^                          |
+     |                          |
+     +--------------------------+
+
+die Programmaufrufe dazu:
+
+TokenProg P1 P2    // startet P1 mit Verbindung P2
+TokenProg P2 P3    // startet P2 mit Verbindung P3
+TokenProg P3 P4    // startet P3 mit Verbindung P4
+TokenProg P4 P1    // startet P4 mit Verbindung P1
+
+-------------------------------------------------------------------
+
+Die Datenstrukturen und Funktionskoepfe koennten so aussehen:
+
+struct  tokenType
+{
+	int used;
+	int ack;
+	int sender;
+	int receiver;
+	char *message;
+}
+
+int generate_Tocken();
+(* generiert zu Beginn einen Token *)
+
+int send(int sender, int receiver, char *message); 
+(* der Sender ruft die Funktion send mit seiner
+   Sender-ID, der Receiver-ID und der zu sendenden
+   Nachricht auf.
+   Funktionalitaet von send:
+	wartet bis der Token "vorbeikommt"
+	ueberprueft das used-Flag
+	--> not used: fuellt die Struktur
+                      und sendet sie an  
+         	      seinen Nachbarn,
+		      warte bis Token mit
+	              ack zurueckkommt.
+		      Fehlerkontrolle.
+	--> used: schicke besetztes Token weiter
+                  warte bis Token wieder kommt.
+*)
+
+int get_Token(tokenTyp *T);
+(*  lese Token
+   Funktionalitaet von get_Token:
+	wartet bis der Token "vorbeikommt"
+	ueberprueft das used-Flag
+   not used: schicke Token an Nachbarn weiter
+   used:  --> stimmt Receiver-ID mit der eigenen ID ueberein ?
+ 		ja: lese message, setze ack, schicke mit 
+		    geaenderter Adresse zurueck zum sender.
+		nein: schicke Token an Nachbarn weiter
+*)
